@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Infra-Alert Telangana</title>
+    <!-- Chosen Palette: Crimson Tech -->
+    <!-- Application Structure Plan: A multi-tabbed single-page application (SPA). A new district dropdown has been added to the header, which acts as the primary filter for all data displayed. This allows users to switch between a state-wide overview and a focused view of a specific district. All data rendering functions now filter the main dataset based on the selected district. -->
+    <!-- Visualization & Content Choices: 
+        - Report Info: District-specific fault data -> Goal: Organize/Filter -> Viz/Presentation: A dropdown menu in the header. -> Interaction: Selecting a district updates all stats, lists, and the map. -> Justification: This is the most intuitive UI pattern for filtering a large dataset, providing both a macro and micro view of the grid's health. -> Library/Method: Vanilla JS.
+        - Report Info: Real-time vs. Recent historical faults -> Goal: Inform/Compare -> Viz/Presentation: Two distinct lists on the Overview tab, filtered by district. -> Interaction: Live feed highlights new entries; recent list is static on load. -> Justification: Maintains the clear separation between live and historical data, now tailored to the selected geographical area. -> Library/Method: Vanilla JS.
+        - Report Info: Geospatial fault locations -> Goal: Inform/Organize -> Viz/Presentation: Interactive Google Map. -> Interaction: The map now dynamically pans and zooms to frame the selected district, showing only relevant power lines and faults. -> Justification: This provides immediate geospatial context for the filtered data, making it much easier to analyze specific regions. -> Library/Method: Google Maps API.
+    -->
+    <!-- CONFIRMATION: NO SVG graphics used. NO Mermaid JS used. -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; background-color: #f0f2f5; }
+        .tab-link { transition: all 0.2s ease-in-out; }
+        .tab-link.active { border-bottom-color: #dc2626; color: #dc2626; }
+        .content-tab { display: none; }
+        .content-tab.active { display: block; }
+        .chart-container { position: relative; width: 100%; max-width: 400px; margin: auto; height: 300px; max-height: 350px; }
+        .modal-backdrop {
+            display: none; position: fixed; inset: 0; background-color: rgba(0, 0, 0, 0.5); z-index: 40; transition: opacity 0.3s ease-in-out;
+        }
+        .modal {
+            display: none; position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 50; transition: opacity 0.3s ease-in-out, transform 0.3s ease-in-out;
+        }
+        .spinner {
+            border: 4px solid rgba(0, 0, 0, 0.1); width: 36px; height: 36px; border-radius: 50%; border-left-color: #dc2626; animation: spin 1s ease infinite;
+        }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        #map-container { position: relative; height: 60vh; min-height: 500px; width: 100%; border-radius: 0.5rem; border: 1px solid #d1d5db; background-color: #e5e7eb; display: flex; align-items: center; justify-content: center; text-align: center; }
+        #map { height: 100%; width: 100%; border-radius: 0.5rem; }
+        #toast-notification {
+            position: fixed;
+            bottom: -100px;
+            left: 50%;
+            transform: translateX(-50%);
+            background-color: #2d3748;
+            color: white;
+            padding: 1rem 1.5rem;
+            border-radius: 0.5rem;
+            z-index: 100;
+            transition: bottom 0.5s ease-in-out;
+            box-shadow: 0 10px 15px -3px rgba(0,0,0,0.1), 0 4px 6px -2px rgba(0,0,0,0.05);
+        }
+        @keyframes highlight-new-event {
+            0% { background-color: rgba(59, 130, 246, 0.2); }
+            100% { background-color: transparent; }
+        }
+        .new-event {
+            animation: highlight-new-event 1.5s ease-out;
+        }
+    </style>
+</head>
+<body class="bg-gray-100">
+    <div id="app-container" class="container mx-auto p-4 max-w-7xl">
+        <!-- Header -->
+        <header class="mb-6 flex justify-between items-center flex-wrap gap-4">
+            <div>
+                <h1 class="text-3xl font-bold text-gray-800">Infra-Alert Telangana</h1>
+                <p class="text-gray-500">Real-time Power Line Fault Detection & Geospatial Analysis</p>
+            </div>
+            <div class="flex items-center space-x-3 bg-white px-3 py-2 rounded-lg shadow-sm">
+                <label for="district-selector" class="text-sm font-medium text-gray-700">District:</label>
+                <select id="district-selector" class="border-gray-300 rounded-md shadow-sm focus:border-indigo-300 focus:ring focus:ring-indigo-200 focus:ring-opacity-50">
+                    <!-- Options will be populated by JS -->
+                </select>
+            </div>
+        </header>
+
+        <!-- Stats Grid -->
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+            <div class="bg-white p-4 rounded-lg shadow"><h3 class="text-sm font-medium text-gray-500">Total Power Lines</h3><p id="stat-total-lines" class="text-2xl font-semibold text-gray-800">0</p></div>
+            <div class="bg-white p-4 rounded-lg shadow"><h3 class="text-sm font-medium text-gray-500">Total Faults Detected</h3><p id="stat-total-faults" class="text-2xl font-semibold text-gray-800">0</p></div>
+            <div class="bg-white p-4 rounded-lg shadow"><h3 class="text-sm font-medium text-gray-500">Recent Faults (24h)</h3><p id="stat-recent-faults" class="text-2xl font-semibold text-gray-800">0</p></div>
+            <div class="bg-white p-4 rounded-lg shadow"><h3 class="text-sm font-medium text-gray-500">System Status</h3><div class="flex items-center mt-2"><div id="status-indicator" class="w-3 h-3 bg-green-500 rounded-full mr-2 transition-colors"></div><p id="status-text" class="text-lg font-semibold text-green-600">Operational</p></div></div>
+        </div>
+
+        <!-- Tabs Navigation -->
+        <div class="bg-white rounded-lg shadow mb-6">
+            <nav class="flex border-b border-gray-200 flex-wrap">
+                <button data-tab="overview" class="tab-link active py-4 px-6 font-semibold text-gray-500 border-b-2 border-transparent hover:text-red-600">Overview</button>
+                <button data-tab="geospatial" class="tab-link py-4 px-6 font-semibold text-gray-500 border-b-2 border-transparent hover:text-red-600">Geospatial View</button>
+                <button data-tab="fault-events" class="tab-link py-4 px-6 font-semibold text-gray-500 border-b-2 border-transparent hover:text-red-600">Fault History</button>
+                <button data-tab="power-lines" class="tab-link py-4 px-6 font-semibold text-gray-500 border-b-2 border-transparent hover:text-red-600">Power Lines</button>
+                <button data-tab="simulator" class="tab-link py-4 px-6 font-semibold text-gray-500 border-b-2 border-transparent hover:text-red-600">Fault Simulator</button>
+            </nav>
+        </div>
+
+        <!-- Tabs Content -->
+        <main>
+            <!-- Overview Tab -->
+            <div id="overview-tab" class="content-tab active">
+                <div class="grid md:grid-cols-2 gap-6">
+                    <div class="bg-white p-6 rounded-lg shadow">
+                        <h2 class="text-xl font-semibold mb-4 text-gray-800">Live Event Feed</h2>
+                        <div id="live-event-feed" class="space-y-4 h-[400px] overflow-y-auto pr-2">
+                            <p class="text-gray-500 p-4">Awaiting real-time fault data...</p>
+                        </div>
+                    </div>
+                    <div class="bg-white p-6 rounded-lg shadow">
+                        <h2 class="text-xl font-semibold mb-4 text-gray-800">Recent Faults (Last 24h)</h2>
+                        <div id="recent-faults-list" class="space-y-4 h-[400px] overflow-y-auto pr-2">
+                           <p class="text-gray-500">No fault events in the last 24 hours.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Geospatial View Tab -->
+            <div id="geospatial-tab" class="content-tab">
+                <div class="grid lg:grid-cols-3 gap-6">
+                    <div class="lg:col-span-2 bg-white p-4 rounded-lg shadow">
+                        <div id="map-container">
+                            <div id="map"></div>
+                        </div>
+                    </div>
+                    <div class="lg:col-span-1 bg-white p-6 rounded-lg shadow">
+                        <h2 class="text-xl font-semibold text-gray-800 mb-4">AI Forecast & Analysis</h2>
+                        <p class="text-gray-600 text-sm mb-4">Use Gemini to analyze historical fault data and predict which power line is most vulnerable to a fault in the near future.</p>
+                        <button id="generate-forecast-btn" class="w-full bg-indigo-600 text-white py-2 rounded-md font-semibold hover:bg-indigo-700 mb-4">✨ Generate Forecast</button>
+                        <div id="forecast-result" class="bg-gray-50 p-4 rounded-md min-h-[200px]">
+                            <p class="text-gray-500">Click the button to generate an AI-powered forecast.</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Fault Events Tab --><div id="fault-events-tab" class="content-tab"><div class="bg-white p-6 rounded-lg shadow"><h2 class="text-xl font-semibold text-gray-800 mb-4">Complete Fault History</h2><input type="text" id="fault-search" placeholder="Search by Fault ID or Line..." class="w-full p-2 border border-gray-300 rounded-md mb-4"><div id="all-faults-list" class="space-y-4"></div></div></div>
+            <!-- Power Lines Tab --><div id="power-lines-tab" class="content-tab"><div class="bg-white p-6 rounded-lg shadow"><div class="flex justify-between items-center mb-4"><h2 class="text-xl font-semibold text-gray-800">Power Lines Configuration</h2><button id="add-power-line-btn" class="bg-red-600 text-white px-4 py-2 rounded-md font-semibold hover:bg-red-700">Add Power Line</button></div><div id="power-lines-list" class="space-y-4"></div></div></div>
+            <!-- Simulator Tab --><div id="simulator-tab" class="content-tab"><div class="grid md:grid-cols-2 gap-6"><div class="bg-white p-6 rounded-lg shadow"><h2 class="text-xl font-semibold text-gray-800 mb-4">Fault Simulator</h2><p class="text-gray-600 mb-6">Manually simulate power line faults.</p><form id="simulator-form" class="space-y-4"><div><label for="sim-power-line" class="block text-sm font-medium text-gray-700">Select Power Line</label><select id="sim-power-line" class="mt-1 block w-full p-2 border border-gray-300 rounded-md"></select></div><div><label for="sim-fault-type" class="block text-sm font-medium text-gray-700">Fault Type</label><select id="sim-fault-type" class="mt-1 block w-full p-2 border border-gray-300 rounded-md"><option>LG (Line-to-Ground)</option><option>LL (Line-to-Line)</option><option>LLG (Double Line-to-Ground)</option><option>LLLG (Three-Phase-to-Ground)</option></select></div><div><label for="sim-distance" class="block text-sm font-medium text-gray-700">Fault Distance (km) - Optional</label><input type="number" id="sim-distance" placeholder="Auto-generate if empty" class="mt-1 block w-full p-2 border border-gray-300 rounded-md"></div><button type="submit" class="w-full bg-red-600 text-white py-2 rounded-md font-semibold hover:bg-red-700">Run Manual Simulation</button></form></div><div class="bg-white p-6 rounded-lg shadow"><h2 class="text-xl font-semibold text-gray-800 mb-4">Simulation Status</h2><p class="text-gray-600 mb-4">The system is automatically simulating a new fault every 15 seconds to mimic a real-time n8n workflow.</p><div id="simulation-result" class="hidden"><h3 class="font-semibold text-lg text-gray-800">Last Manual Simulation:</h3><div class="bg-gray-50 p-4 rounded-md mt-2 space-y-2 text-sm"></div></div></div></div></div>
+        </main>
+    </div>
+
+    <!-- Modals & Notifications -->
+    <div id="power-line-modal-backdrop" class="modal-backdrop"></div><div id="power-line-modal" class="modal bg-white rounded-lg shadow-xl w-full max-w-lg"><form id="power-line-form" class="p-6"><h2 id="modal-title" class="text-xl font-bold text-gray-800 mb-4">Add Power Line</h2><input type="hidden" id="line-id"><div class="space-y-2 mb-4"><label for="line-description" class="block text-sm font-medium text-gray-700">Describe the Power Line (e.g., "a 30km line from Karimnagar to Ramagundam")</label><div class="flex items-center space-x-2"><input type="text" id="line-description" class="block w-full p-2 border border-gray-300 rounded-md"><button type="button" id="suggest-details-btn" class="bg-indigo-600 text-white px-3 py-2 rounded-md font-semibold hover:bg-indigo-700 text-sm whitespace-nowrap">✨ Suggest</button></div></div><div class="h-px bg-gray-200 my-6"></div><div class="space-y-4"><div><label for="line-name" class="block text-sm font-medium text-gray-700">Line Name</label><input type="text" id="line-name" class="mt-1 block w-full p-2 border border-gray-300 rounded-md" required></div><div class="grid grid-cols-2 gap-4"><div><label for="line-length" class="block text-sm font-medium text-gray-700">Length (km)</label><input type="number" id="line-length" class="mt-1 block w-full p-2 border border-gray-300 rounded-md" required></div><div><label for="line-impedance" class="block text-sm font-medium text-gray-700">Impedance (Ω/km)</label><input type="number" step="0.01" id="line-impedance" class="mt-1 block w-full p-2 border border-gray-300 rounded-md" required></div></div><div class="grid grid-cols-2 gap-4"><div><label for="line-start" class="block text-sm font-medium text-gray-700">Start (Lat, Lng)</label><input type="text" id="line-start" class="mt-1 block w-full p-2 border border-gray-300 rounded-md" placeholder="18.4386, 79.1288" required></div><div><label for="line-end" class="block text-sm font-medium text-gray-700">End (Lat, Lng)</label><input type="text" id="line-end" class="mt-1 block w-full p-2 border border-gray-300 rounded-md" placeholder="18.7533, 79.4632" required></div></div></div><div class="flex justify-end space-x-3 pt-6"><button type="button" id="cancel-modal-btn" class="bg-gray-200 text-gray-700 px-4 py-2 rounded-md font-semibold hover:bg-gray-300">Cancel</button><button type="submit" class="bg-red-600 text-white px-4 py-2 rounded-md font-semibold hover:bg-red-700">Save</button></div></form></div>
+    <div id="ai-summary-modal-backdrop" class="modal-backdrop"></div><div id="ai-summary-modal" class="modal bg-white rounded-lg shadow-xl w-full max-w-lg"><div class="p-6"><div class="flex items-start justify-between"><h2 class="text-xl font-bold text-gray-800 mb-4">✨ AI Fault Analysis</h2><button id="close-ai-modal-btn" class="text-gray-400 hover:text-gray-600 text-2xl">&times;</button></div><div id="ai-summary-content" class="min-h-[150px]"></div></div></div>
+    <div id="toast-notification"></div>
+
+    <script>
+        const GOOGLE_MAPS_API_KEY = "AIzaSyCCdwnURm9LPZmHbrVKb0Ch3rj_VCN9T00";
+
+        let map;
+        let faultMarkers = [];
+        let linePaths = [];
+
+        function initializeMap() {
+            if (GOOGLE_MAPS_API_KEY === "YOUR_GOOGLE_MAPS_API_KEY") {
+                document.getElementById('map-container').innerHTML = `<div class="p-4 text-gray-600"><h3 class="font-bold text-lg mb-2">Google Maps Not Configured</h3><p class="text-sm">To enable the geospatial view, please get a Google Maps API key and paste it into the <code>GOOGLE_MAPS_API_KEY</code> variable at the top of this <code>&lt;script&gt;</code> tag.</p></div>`;
+                window.dispatchEvent(new Event('mapready')); 
+                return;
+            }
+            if (document.getElementById('google-maps-script')) return;
+            const script = document.createElement('script');
+            script.id = 'google-maps-script';
+            script.src = `https://maps.googleapis.com/maps/api/js?key=${GOOGLE_MAPS_API_KEY}&callback=initMap&libraries=geometry`;
+            script.async = true;
+            script.defer = true;
+            document.head.appendChild(script);
+        }
+
+        function initMap() {
+            const telanganaCenter = { lat: 17.8741, lng: 79.1121 };
+            map = new google.maps.Map(document.getElementById("map"), {
+                zoom: 8,
+                center: telanganaCenter,
+                mapTypeId: 'roadmap',
+                styles: [ { "featureType": "all", "elementType": "geometry.fill", "stylers": [ { "weight": "2.00" } ] }, { "featureType": "all", "elementType": "geometry.stroke", "stylers": [ { "color": "#9c9c9c" } ] }, { "featureType": "all", "elementType": "labels.text", "stylers": [ { "visibility": "on" } ] }, { "featureType": "landscape", "elementType": "all", "stylers": [ { "color": "#f2f2f2" } ] }, { "featureType": "landscape", "elementType": "geometry.fill", "stylers": [ { "color": "#ffffff" } ] }, { "featureType": "landscape.man_made", "elementType": "geometry.fill", "stylers": [ { "color": "#ffffff" } ] }, { "featureType": "poi", "elementType": "all", "stylers": [ { "visibility": "off" } ] }, { "featureType": "road", "elementType": "all", "stylers": [ { "saturation": -100 }, { "lightness": 45 } ] }, { "featureType": "road", "elementType": "geometry.fill", "stylers": [ { "color": "#eeeeee" } ] }, { "featureType": "road", "elementType": "labels.text.fill", "stylers": [ { "color": "#7b7b7b" } ] }, { "featureType": "road", "elementType": "labels.text.stroke", "stylers": [ { "color": "#ffffff" } ] }, { "featureType": "road.highway", "elementType": "all", "stylers": [ { "visibility": "simplified" } ] }, { "featureType": "road.arterial", "elementType": "labels.icon", "stylers": [ { "visibility": "off" } ] }, { "featureType": "transit", "elementType": "all", "stylers": [ { "visibility": "off" } ] }, { "featureType": "water", "elementType": "all", "stylers": [ { "color": "#46bcec" }, { "visibility": "on" } ] }, { "featureType": "water", "elementType": "geometry.fill", "stylers": [ { "color": "#c8d7d4" } ] }, { "featureType": "water", "elementType": "labels.text.fill", "stylers": [ { "color": "#070707" } ] }, { "featureType": "water", "elementType": "labels.text.stroke", "stylers": [ { "color": "#ffffff" } ] } ]
+            });
+            window.dispatchEvent(new Event('mapready'));
+        }
+    </script>
+<script>
+document.addEventListener('DOMContentLoaded', () => {
+    
+    // --- DATABASE ---
+    let liveFaults = [];
+    let currentDistrict = 'All Telangana';
+
+    const districts = {
+        'All Telangana': { center: { lat: 17.8741, lng: 79.1121 }, zoom: 8 },
+        'Hyderabad': { center: { lat: 17.3850, lng: 78.4867 }, zoom: 11 },
+        'Warangal': { center: { lat: 17.9689, lng: 79.5941 }, zoom: 11 },
+        'Nizamabad': { center: { lat: 18.6714, lng: 78.0941 }, zoom: 11 },
+        'Khammam': { center: { lat: 17.2473, lng: 80.1514 }, zoom: 11 },
+        'Karimnagar': { center: { lat: 18.4386, lng: 79.1288 }, zoom: 11 }
+    };
+
+    const fullDataset = {
+        powerLines: [
+            // Karimnagar
+            { id: 'pl001', district: 'Karimnagar', name: 'Karimnagar - Ramagundam Main', length: 55.2, impedance: 0.32, start: '18.4386, 79.1288', end: '18.7533, 79.4632' },
+            { id: 'pl002', district: 'Karimnagar', name: 'Manair Dam Hydro Line', length: 12.5, impedance: 0.45, start: '18.4011, 79.1244', end: '18.4386, 79.1288' },
+            { id: 'pl003', district: 'Karimnagar', name: 'Karimnagar - Sircilla Feeder', length: 42.8, impedance: 0.38, start: '18.4386, 79.1288', end: '18.3840, 78.7307' },
+            // Hyderabad
+            { id: 'pl004', district: 'Hyderabad', name: 'Gachibowli - Shamshabad Feeder', length: 28.5, impedance: 0.38, start: '17.4401, 78.3489', end: '17.2349, 78.4294' },
+            { id: 'pl005', district: 'Hyderabad', name: 'HITEC City Tech Loop', length: 15.2, impedance: 0.35, start: '17.4510, 78.3812', end: '17.4425, 78.3770' },
+            // Warangal
+            { id: 'pl006', district: 'Warangal', name: 'Warangal - Kazipet Link', length: 13.0, impedance: 0.41, start: '17.9689, 79.5941', end: '17.9754, 79.5350' },
+            { id: 'pl007', district: 'Warangal', name: 'Bhadrakali Temple Feeder', length: 8.5, impedance: 0.48, start: '17.9689, 79.5941', end: '17.9602, 79.6051' },
+             // Nizamabad
+            { id: 'pl008', district: 'Nizamabad', name: 'Nizamabad - Armoor Line', length: 27.0, impedance: 0.36, start: '18.6714, 78.0941', end: '18.8475, 78.3243' },
+            // Khammam
+            { id: 'pl009', district: 'Khammam', name: 'Khammam - Palvancha Industrial', length: 58.0, impedance: 0.29, start: '17.2473, 80.1514', end: '17.5962, 80.6865' },
+        ],
+        faultEvents: [
+            // Karimnagar
+            { id: 'fe001', district: 'Karimnagar', lineId: 'pl003', lineName: 'Karimnagar - Sircilla Feeder', type: 'LG', detected: new Date(Date.now() - 3600000 * 2).toISOString(), severity: 'Medium', location: 25.5, voltageDrop: 45.1, currentSpike: 95421.7 },
+            { id: 'fe002', district: 'Karimnagar', lineId: 'pl001', lineName: 'Karimnagar - Ramagundam Main', type: 'LLG', detected: new Date(Date.now() - 3600000 * 8).toISOString(), severity: 'High', location: 10.2, voltageDrop: 72.8, currentSpike: 215839.1 },
+            { id: 'fe006', district: 'Karimnagar', lineId: 'pl001', lineName: 'Karimnagar - Ramagundam Main', type: 'LL', detected: new Date(new Date().setMonth(new Date().getMonth() - 3)).toISOString(), severity: 'Low', location: 45.9, voltageDrop: 22.8, currentSpike: 35890.1 },
+            // Hyderabad
+            { id: 'fe003', district: 'Hyderabad', lineId: 'pl004', lineName: 'Gachibowli - Shamshabad Feeder', type: 'LL', detected: new Date(Date.now() - 3600000 * 15).toISOString(), severity: 'Low', location: 18.1, voltageDrop: 20.5, currentSpike: 31254.6 },
+            { id: 'fe007', district: 'Hyderabad', lineId: 'pl005', lineName: 'HITEC City Tech Loop', type: 'LLG', detected: new Date(new Date().setMonth(new Date().getMonth() - 4)).toISOString(), severity: 'Medium', location: 8.2, voltageDrop: 58.3, currentSpike: 102456.7 },
+            // Warangal
+            { id: 'fe004', district: 'Warangal', lineId: 'pl006', lineName: 'Warangal - Kazipet Link', type: 'LLLG', detected: new Date(new Date().setMonth(new Date().getMonth() - 1)).toISOString(), severity: 'High', location: 5.5, voltageDrop: 85.2, currentSpike: 301245.8 },
+             // Nizamabad
+            { id: 'fe005', district: 'Nizamabad', lineId: 'pl008', lineName: 'Nizamabad - Armoor Line', type: 'LG', detected: new Date(new Date().setMonth(new Date().getMonth() - 2)).toISOString(), severity: 'Medium', location: 13.1, voltageDrop: 40.1, currentSpike: 89123.4 },
+             // Khammam
+            { id: 'fe008', district: 'Khammam', lineId: 'pl009', lineName: 'Khammam - Palvancha Industrial', type: 'LG', detected: new Date(new Date().setMonth(new Date().getMonth() - 5)).toISOString(), severity: 'High', location: 50.1, voltageDrop: 65.5, currentSpike: 189321.5 },
+        ]
+    };
+
+    function getFilteredData() {
+        if (currentDistrict === 'All Telangana') {
+            return {
+                powerLines: fullDataset.powerLines,
+                faultEvents: fullDataset.faultEvents
+            };
+        }
+        return {
+            powerLines: fullDataset.powerLines.filter(p => p.district === currentDistrict),
+            faultEvents: fullDataset.faultEvents.filter(f => f.district === currentDistrict)
+        };
+    }
+    
+    let faultTypeChart, severityChart, faultInfoWindow;
+    const TABS = document.querySelectorAll('.tab-link'), CONTENT_PANELS = document.querySelectorAll('.content-tab');
+    
+    async function callAIBackend(type, data) {
+        // AI calls remain placeholders for this version
+        console.warn("AI Backend not implemented. This is a simulation.");
+        return new Promise(resolve => setTimeout(() => {
+            const districtName = data.district || currentDistrict;
+            if (type === 'summary') {
+                resolve({ summary: `[AI SIMULATION in ${districtName}] Based on the fault on ${data.lineName}, immediate inspection is advised. This ${data.type} fault with ${data.severity} severity suggests a high risk of localized outages.` });
+            } else if (type === 'suggest') {
+                resolve({ details: { name: `Suggested: ${data.description}`, length: 25, startCoords: '18.43, 79.12', endCoords: '18.55, 79.23' } });
+            } else if (type === 'forecast') {
+                const lines = data.powerLines;
+                const hotspot = lines.length > 0 ? lines[0].name : "N/A";
+                resolve({ forecast: { predictedHotspot: `[AI SIMULATION in ${districtName}] ${hotspot}`, justification: `This line has the highest combination of historical fault frequency and load in the selected district.` } });
+            }
+        }, 1000));
+    }
+
+    function init() {
+        populateDistrictSelector();
+        initializeMap();
+        TABS.forEach(tab => tab.addEventListener('click', () => {
+             TABS.forEach(t => t.classList.remove('active')); tab.classList.add('active'); const target = tab.getAttribute('data-tab');
+             CONTENT_PANELS.forEach(panel => panel.id === `${target}-tab` ? panel.classList.add('active') : panel.classList.remove('active'));
+             if (target === 'geospatial' && typeof google !== 'undefined' && map) { google.maps.event.trigger(map, 'resize'); }
+        }));
+        window.addEventListener('mapready', () => { renderAll(); setupEventListeners(); startRealtimeSimulation(); });
+    }
+    
+    function renderAll() {
+        updateStats(); renderRecentFaults(); renderAllFaults(); renderPowerLines();
+        populateSimulatorDropdown(); renderCharts(); drawOnMap(); renderLiveFeed();
+    }
+
+    function populateDistrictSelector() {
+        const selector = document.getElementById('district-selector');
+        selector.innerHTML = Object.keys(districts).map(d => `<option value="${d}">${d}</option>`).join('');
+    }
+
+    function updateStats() {
+        const { powerLines, faultEvents } = getFilteredData();
+        const allFaults = [...faultEvents, ...liveFaults.filter(f => currentDistrict === 'All Telangana' || f.district === currentDistrict)];
+        document.getElementById('stat-total-lines').textContent = powerLines.length;
+        document.getElementById('stat-total-faults').textContent = allFaults.length;
+        const recentFaults = allFaults.filter(f => (new Date() - new Date(f.detected)) / (1000 * 60 * 60) <= 24).length;
+        document.getElementById('stat-recent-faults').textContent = recentFaults;
+    }
+    
+    const severityClasses = { 'High': 'text-red-600 bg-red-100', 'Medium': 'text-yellow-600 bg-yellow-100', 'Low': 'text-green-600 bg-green-100' };
+    function createFaultCard(fault, isLive = false, showFullDate = false) { 
+        const date = new Date(fault.detected);
+        const timeString = date.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+        const dateString = date.toLocaleDateString('en-IN', { day: '2-digit', month: 'short' });
+        const displayTime = showFullDate ? `${dateString}, ${timeString}` : timeString;
+
+        return `
+            <div class="border border-gray-200 rounded-lg p-4 bg-gray-50 hover:shadow-md transition-shadow">
+                <div class="flex justify-between items-start">
+                    <div>
+                        <p class="font-bold text-gray-800">${fault.lineName} <span class="text-xs font-normal text-gray-500">(${fault.district})</span></p>
+                        <p class="text-xs text-gray-500">Fault ID: ${fault.id}</p>
+                    </div>
+                    <div class="flex items-center space-x-2">
+                         <button class="show-on-map-btn text-sm text-blue-600 hover:underline" data-fault-id="${fault.id}">Show on Map</button>
+                         <button class="generate-summary-btn text-sm text-indigo-600 hover:underline" data-id="${fault.id}">✨ AI Summary</button>
+                        <span class="text-xs font-bold px-2 py-1 rounded-full ${severityClasses[fault.severity] || ''}">${fault.severity}</span>
+                    </div>
+                </div>
+                <div class="grid grid-cols-2 ${isLive ? '' : 'md:grid-cols-4'} gap-2 mt-3 text-sm">
+                    <p><strong class="font-medium text-gray-600">Type:</strong> ${fault.type}</p>
+                    <p><strong class="font-medium text-gray-600">Location:</strong> ${fault.location.toFixed(2)} km</p>
+                    <p><strong class="font-medium text-gray-600">V. Drop:</strong> ${fault.voltageDrop.toFixed(1)}%</p>
+                    <p><strong class="font-medium text-gray-600">Time:</strong> ${displayTime}</p>
+                </div>
+            </div>`;
+    }
+
+    function renderLiveFeed() {
+        const container = document.getElementById('live-event-feed');
+        const filteredLive = liveFaults.filter(f => currentDistrict === 'All Telangana' || f.district === currentDistrict);
+        if (filteredLive.length === 0) {
+            container.innerHTML = '<p class="text-gray-500 p-4">Awaiting real-time fault data...</p>';
+            return;
+        }
+        container.innerHTML = filteredLive.map(fault => createFaultCard(fault, true)).join('');
+        const firstChild = container.firstChild;
+        if (firstChild && firstChild.nodeType === 1) {
+            firstChild.classList.add('new-event');
+            setTimeout(() => firstChild.classList.remove('new-event'), 1500);
+        }
+    }
+
+    function renderRecentFaults() {
+        const c = document.getElementById('recent-faults-list');
+        const { faultEvents } = getFilteredData();
+        const recent = faultEvents.filter(f => (new Date() - new Date(f.detected)) / (1000 * 60 * 60) <= 24);
+        if(recent.length === 0){ c.innerHTML='<p class="text-gray-500 p-4">No fault events in the last 24 hours.</p>'; return; }
+        c.innerHTML = recent.map(fault => createFaultCard(fault, true)).join('');
+    }
+
+    function renderAllFaults(filter = '') {
+        const { faultEvents } = getFilteredData();
+        const filteredLive = liveFaults.filter(f => currentDistrict === 'All Telangana' || f.district === currentDistrict);
+        const allFaults = [...filteredLive, ...faultEvents].sort((a,b) => new Date(b.detected) - new Date(a.detected));
+        const c = document.getElementById('all-faults-list');
+        const f = allFaults.filter(fl=>fl.id.toLowerCase().includes(filter.toLowerCase())||fl.lineName.toLowerCase().includes(filter.toLowerCase()));
+        if(f.length===0){c.innerHTML='<p class="text-gray-500">No faults match search.</p>';return;}
+        c.innerHTML = f.map(fault => createFaultCard(fault, false, true)).join('');
+    }
+    
+    function renderPowerLines() {
+        const c = document.getElementById('power-lines-list');
+        const { powerLines } = getFilteredData();
+        if(powerLines.length===0){c.innerHTML='<p class="text-gray-500">No power lines in this district.</p>';return;}
+        c.innerHTML = powerLines.map(l=>`<div class="border border-gray-200 rounded-lg p-4 bg-white"><div class="flex justify-between items-start"><div><h3 class="font-bold text-lg text-gray-800">${l.name}</h3><p class="text-xs text-gray-500">ID: ${l.id}</p></div><div class="flex space-x-2"><button class="edit-line-btn text-sm text-blue-600 hover:underline" data-id="${l.id}">Edit</button><button class="delete-line-btn text-sm text-red-600 hover:underline" data-id="${l.id}">Delete</button></div></div><div class="grid grid-cols-2 md:grid-cols-4 gap-2 mt-3 text-sm"><p><strong class="font-medium text-gray-600">Length:</strong> ${l.length} km</p><p><strong class="font-medium text-gray-600">Impedance:</strong> ${l.impedance} Ω/km</p><p><strong class="font-medium text-gray-600">Start:</strong> ${l.start}</p><p><strong class="font-medium text-gray-600">End:</strong> ${l.end}</p></div></div>`).join('');
+    }
+    function populateSimulatorDropdown() {
+        const { powerLines } = getFilteredData();
+        const selector = document.getElementById('sim-power-line');
+        if (powerLines.length > 0) {
+            selector.innerHTML = powerLines.map(l=>`<option value="${l.id}">${l.name}</option>`).join('');
+            selector.disabled = false;
+        } else {
+            selector.innerHTML = `<option>No power lines in selected district</option>`;
+            selector.disabled = true;
+        }
+    }
+    function renderCharts() { 
+        const { faultEvents } = getFilteredData();
+        const filteredLive = liveFaults.filter(f => currentDistrict === 'All Telangana' || f.district === currentDistrict);
+        const allFaults = [...faultEvents, ...filteredLive];
+        const typeCtx=document.getElementById('faultTypeChart')?.getContext('2d'),sevCtx=document.getElementById('severityChart')?.getContext('2d');
+        if(!typeCtx || !sevCtx) return;
+        const typeC=allFaults.reduce((a,f)=>({...a,[f.type]:(a[f.type]||0)+1}),{}),sevC=allFaults.reduce((a,f)=>({...a,[f.severity]:(a[f.severity]||0)+1}),{}),opts={responsive:!0,maintainAspectRatio:!1,plugins:{legend:{position:'bottom'}}}; if(faultTypeChart)faultTypeChart.destroy();faultTypeChart=new Chart(typeCtx,{type:'doughnut',data:{labels:Object.keys(typeC),datasets:[{data:Object.values(typeC),backgroundColor:['#ef4444','#f97316','#eab308','#22c55e']}]},options:opts}); if(severityChart)severityChart.destroy();severityChart=new Chart(sevCtx,{type:'doughnut',data:{labels:Object.keys(sevC),datasets:[{data:Object.values(sevC),backgroundColor:['#ef4444','#eab308','#22c55e']}]},options:opts}); 
+    }
+
+    function drawOnMap() {
+        if (!map || typeof google === 'undefined') return;
+        const { powerLines, faultEvents } = getFilteredData();
+        const filteredLive = liveFaults.filter(f => currentDistrict === 'All Telangana' || f.district === currentDistrict);
+        const allFaults = [...faultEvents, ...filteredLive];
+        
+        const mapConfig = districts[currentDistrict];
+        map.setCenter(mapConfig.center);
+        map.setZoom(mapConfig.zoom);
+
+        linePaths.forEach(line => line.setMap(null)); linePaths = [];
+        faultMarkers.forEach(marker => marker.setMap(null)); faultMarkers = [];
+        
+        powerLines.forEach(line => {
+            const start = { lat: parseFloat(line.start.split(',')[0]), lng: parseFloat(line.start.split(',')[1]) };
+            const end = { lat: parseFloat(line.end.split(',')[0]), lng: parseFloat(line.end.split(',')[1]) };
+            const path = new google.maps.Polyline({ path: [start, end], geodesic: true, strokeColor: '#3b82f6', strokeOpacity: 0.8, strokeWeight: 4 });
+            path.setMap(map); linePaths.push(path);
+        });
+
+        const severityIcons = {
+            'High': { path: google.maps.SymbolPath.CIRCLE, scale: 8, fillColor: '#dc2626', fillOpacity: 1, strokeColor: 'white', strokeWeight: 2 },
+            'Medium': { path: google.maps.SymbolPath.CIRCLE, scale: 8, fillColor: '#f59e0b', fillOpacity: 1, strokeColor: 'white', strokeWeight: 2 },
+            'Low': { path: google.maps.SymbolPath.CIRCLE, scale: 8, fillColor: '#16a34a', fillOpacity: 1, strokeColor: 'white', strokeWeight: 2 }
+        };
+
+        allFaults.forEach(fault => {
+            const line = powerLines.find(l => l.id === fault.lineId); if (!line) return;
+            const start = { lat: parseFloat(line.start.split(',')[0]), lng: parseFloat(line.start.split(',')[1]) };
+            const end = { lat: parseFloat(line.end.split(',')[0]), lng: parseFloat(line.end.split(',')[1]) };
+            const faultLocation = google.maps.geometry.spherical.interpolate(start, end, fault.location / line.length);
+            
+            const marker = new google.maps.Marker({ position: faultLocation, map: map, icon: severityIcons[fault.severity] || severityIcons['Low'], title: `Fault: ${fault.id}` });
+            marker.faultId = fault.id;
+            
+            marker.addListener('click', () => {
+                if (faultInfoWindow) faultInfoWindow.close();
+                faultInfoWindow = new google.maps.InfoWindow({ content: `<div><h4 style="font-weight:bold;">Fault: ${fault.id}</h4><p>${fault.lineName}</p><p>Severity: ${fault.severity}</p><p>Location: ${fault.location.toFixed(2)} km</p></div>` });
+                faultInfoWindow.open(map, marker);
+            });
+            faultMarkers.push(marker);
+        });
+    }
+
+    function showToast(message) {
+        const toast = document.getElementById('toast-notification');
+        toast.textContent = message;
+        toast.style.bottom = '20px';
+        setTimeout(() => {
+            toast.style.bottom = '-100px';
+        }, 4000);
+    }
+
+    function setupEventListeners() {
+        document.getElementById('district-selector').addEventListener('change', e => {
+            currentDistrict = e.target.value;
+            renderAll();
+        });
+
+        document.getElementById('fault-search').addEventListener('input', e=>renderAllFaults(e.target.value));
+        const plM=document.getElementById('power-line-modal'),plB=document.getElementById('power-line-modal-backdrop'),plF=document.getElementById('power-line-form'),plT=document.getElementById('modal-title');
+        const oM=()=>{plB.style.display='block';plM.style.display='block';},cM=()=>{plB.style.display='none';plM.style.display='none';plF.reset();document.getElementById('line-id').value='';};
+        document.getElementById('add-power-line-btn').addEventListener('click',()=>{plT.textContent='Add Power Line';oM();});
+        document.getElementById('cancel-modal-btn').addEventListener('click',cM); plB.addEventListener('click',cM);
+        plF.addEventListener('submit', e=>{ e.preventDefault(); const id=document.getElementById('line-id').value, lD={name:document.getElementById('line-name').value,length:parseFloat(document.getElementById('line-length').value),impedance:parseFloat(document.getElementById('line-impedance').value),start:document.getElementById('line-start').value,end:document.getElementById('line-end').value, district: currentDistrict === 'All Telangana' ? 'Hyderabad' : currentDistrict }; if(id){const i=fullDataset.powerLines.findIndex(l=>l.id===id);fullDataset.powerLines[i]={...fullDataset.powerLines[i],...lD};}else{lD.id='pl'+String(Date.now()).slice(-5);fullDataset.powerLines.push(lD);} cM();renderAll(); });
+        document.getElementById('power-lines-list').addEventListener('click', e=>{ const id=e.target.dataset.id; if(e.target.classList.contains('edit-line-btn')){const l=fullDataset.powerLines.find(ln=>ln.id===id); if(l){plT.textContent='Edit Power Line';document.getElementById('line-id').value=l.id;document.getElementById('line-name').value=l.name;document.getElementById('line-length').value=l.length;document.getElementById('line-impedance').value=l.impedance;document.getElementById('line-start').value=l.start;document.getElementById('line-end').value=l.end;oM();}}else if(e.target.classList.contains('delete-line-btn')){if(confirm('Delete line?')){fullDataset.powerLines = fullDataset.powerLines.filter(l=>l.id!==id);renderAll();}} });
+        document.getElementById('simulator-form').addEventListener('submit', e=>{ e.preventDefault(); if(!document.getElementById('sim-power-line').disabled) simulateNewFault(true); else alert("Please select a district with power lines to run a simulation.");});
+
+        const aiM=document.getElementById('ai-summary-modal'),aiB=document.getElementById('ai-summary-modal-backdrop'),aiC=document.getElementById('ai-summary-content');
+        const oAM=()=>{aiB.style.display='block';aiM.style.display='block';},cAM=()=>{aiB.style.display='none';aiM.style.display='none';};
+        document.getElementById('close-ai-modal-btn').addEventListener('click',cAM); aiB.addEventListener('click',cAM);
+        document.querySelector('main').addEventListener('click', async e=>{ 
+            if(e.target.classList.contains('generate-summary-btn')){ const allFaults = [...liveFaults, ...fullDataset.faultEvents]; const fId=e.target.dataset.id,fault=allFaults.find(f=>f.id===fId); if(!fault)return; oAM(); aiC.innerHTML='<div class="flex justify-center items-center h-full"><div class="spinner"></div></div>'; const result = await callAIBackend('summary', fault); if(result && result.summary){aiC.innerHTML=`<p class="text-gray-700 leading-relaxed">${result.summary.replace(/\n/g,'<br>')}</p>`;}else{aiC.innerHTML='<p class="text-red-500">Failed to generate summary.</p>';} }
+            if(e.target.classList.contains('show-on-map-btn')){
+                if (!map) { showToast("Map is not available. Please configure API key."); return; }
+                const faultId = e.target.dataset.faultId;
+                const marker = faultMarkers.find(m => m.faultId === faultId);
+                if (marker) {
+                    document.querySelector('button[data-tab="geospatial"]').click();
+                    map.panTo(marker.getPosition());
+                    map.setZoom(14);
+                    google.maps.event.trigger(marker, 'click');
+                }
+            }
+        });
+        document.getElementById('suggest-details-btn').addEventListener('click',async e=>{ const btn=e.target,desc=document.getElementById('line-description').value; if(!desc){alert('Enter description');return;} const oTxt=btn.innerHTML;btn.innerHTML='<div class="spinner w-5 h-5 border-2 mx-auto"></div>';btn.disabled=true; const result = await callAIBackend('suggest', { description: desc, district: currentDistrict }); if(result && result.details){const d=result.details;document.getElementById('line-name').value=d.name||'';document.getElementById('line-length').value=d.length||'';document.getElementById('line-start').value=d.startCoords||'';document.getElementById('line-end').value=d.endCoords||'';}else{alert("Could not generate details.");} btn.innerHTML=oTxt;btn.disabled=false; });
+        document.getElementById('generate-forecast-btn').addEventListener('click', async e => {
+            const { powerLines, faultEvents } = getFilteredData();
+            const filteredLive = liveFaults.filter(f => currentDistrict === 'All Telangana' || f.district === currentDistrict);
+            const allFaults = [...faultEvents, ...filteredLive];
+            const btn=e.target, resDiv=document.getElementById('forecast-result');
+            const oTxt=btn.innerHTML; btn.innerHTML='<div class="spinner w-5 h-5 border-2 mx-auto"></div>'; btn.disabled=true;
+            const result = await callAIBackend('forecast', { powerLines, faultEvents: allFaults, district: currentDistrict });
+            if(result && result.forecast){ const d=result.forecast;resDiv.innerHTML=`<h4 class="font-bold text-indigo-700">Predicted Hotspot:</h4><p class="mb-2">${d.predictedHotspot}</p><h4 class="font-bold text-indigo-700">Justification:</h4><p class="text-sm text-gray-600">${d.justification}</p>`;} else { resDiv.innerHTML='<p class="text-red-500">Failed to generate forecast.</p>'; }
+            btn.innerHTML=oTxt; btn.disabled=false;
+        });
+    }
+
+    function simulateNewFault(isManual = false) {
+        let powerLinesForSim = isManual ? getFilteredData().powerLines : fullDataset.powerLines;
+        if (powerLinesForSim.length === 0) return;
+        
+        const line = isManual ? powerLinesForSim.find(l => l.id === document.getElementById('sim-power-line').value) : powerLinesForSim[Math.floor(Math.random() * powerLinesForSim.length)];
+        const distance = isManual && document.getElementById('sim-distance').value ? parseFloat(document.getElementById('sim-distance').value) : (Math.random() * line.length);
+        const voltageDrop = Math.random() * 80 + 10;
+        const severity = voltageDrop > 70 ? 'High' : (voltageDrop > 40 ? 'Medium' : 'Low');
+        const type = isManual ? document.getElementById('sim-fault-type').value.split(' ')[0] : ['LG', 'LL', 'LLG', 'LLLG'][Math.floor(Math.random() * 4)];
+        
+        const newFault = { id: 'fe'+String(Date.now()).slice(-5), lineId: line.id, lineName: line.name, type: type, detected: new Date().toISOString(), severity: severity, location: distance, voltageDrop: voltageDrop, currentSpike: Math.random()*200000+50000, district: line.district };
+        
+        liveFaults.unshift(newFault);
+        if(liveFaults.length > 50) liveFaults.pop();
+        
+        if (isManual) {
+            fullDataset.faultEvents.unshift(newFault);
+            const resDiv = document.getElementById('simulation-result');
+            resDiv.classList.remove('hidden');
+            resDiv.querySelector('div').innerHTML = `<p><strong class="font-medium text-gray-600">Line:</strong> ${line.name}</p><p><strong class="font-medium text-gray-600">Result:</strong> Fault Detected</p><p><strong class="font-medium text-gray-600">Location:</strong> ${distance.toFixed(2)} km</p><p><strong class="font-medium text-gray-600">Severity:</strong> ${severity}</p>`;
+        }
+        
+        const statusIndicator = document.getElementById('status-indicator');
+        const statusText = document.getElementById('status-text');
+        statusIndicator.classList.remove('bg-green-500'); statusIndicator.classList.add('bg-red-500');
+        statusText.textContent = "Fault Detected!"; statusText.classList.remove('text-green-600'); statusText.classList.add('text-red-600');
+
+        setTimeout(() => {
+            statusIndicator.classList.remove('bg-red-500'); statusIndicator.classList.add('bg-green-500');
+            statusText.textContent = "Operational"; statusText.classList.remove('text-red-600'); statusText.classList.add('text-green-600');
+        }, 5000);
+
+        renderAll();
+    }
+    
+    function startRealtimeSimulation() { setTimeout(() => simulateNewFault(false), 5000); setInterval(() => simulateNewFault(false), 15000); }
+    init();
+});
+</script>
+
+</body>
+</html>
+
